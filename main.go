@@ -31,6 +31,7 @@ var (
 	verboseLogger = log.New(os.Stderr, "DEBUG: ", log.Lmicroseconds|log.Ltime|log.Lshortfile)
 
 	argNumClients    = flag.Int("num-clients", 10, "Number of concurrent clients")
+	argCumulateConnections   = flag.Bool("cumulate-connections", false, "If used, clients will NOT disconnect until the end of the test")
 	argNumMessages   = flag.Int("num-messages", 10, "Number of messages shipped by client")
 	argTimeout       = flag.String("timeout", "5s", "Timeout for pub/sub loop")
 	argGlobalTimeout = flag.String("global-timeout", "60s", "Timeout spanning all operations")
@@ -54,6 +55,8 @@ type Worker struct {
 	Password  string
 	Nmessages int
 	Timeout   time.Duration
+	WaitTestEnd bool
+	TestEndChan chan bool
 }
 
 type Result struct {
@@ -66,6 +69,8 @@ type Result struct {
 	Error             bool
 	ErrorMessage      error
 }
+
+var signalChan chan os.Signal
 
 func main() {
 	flag.Parse()
@@ -108,7 +113,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	signalChan := make(chan os.Signal, 1)
+	signalChan = make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
 	rampUpDelay, _ := time.ParseDuration(*argRampUpDelay)
@@ -119,6 +124,8 @@ func main() {
 	}
 
 	resultChan = make(chan Result, *argNumClients**argNumMessages)
+
+	testEndChan := make(chan bool, *argNumClients)
 
 	for cid := 0; cid < *argNumClients; cid++ {
 
@@ -134,6 +141,9 @@ func main() {
 			Password:  password,
 			Nmessages: num,
 			Timeout:   testTimeout,
+			
+			WaitTestEnd: *argCumulateConnections,
+			TestEndChan: testEndChan,
 		}).Run()
 	}
 	fmt.Printf("%d worker started\n", *argNumClients)
@@ -148,6 +158,19 @@ func main() {
 		time.Sleep(globalTimeout)
 		timeout <- true
 	}()
+
+	testEndChanSignalSent := false
+	sendTestEndChanSignal := func () {
+		if *argCumulateConnections && !testEndChanSignalSent {
+			testEndChanSignalSent = true
+			// Tell workers it's time to go home
+			count := 0
+			for count < *argNumClients {
+				testEndChan<-true
+				count++
+			}
+		}
+	}
 
 	for finEvents < *argNumClients && !stopWaitLoop {
 		select {
@@ -177,14 +200,20 @@ func main() {
 			fmt.Println()
 			fmt.Printf("Aborted because global timeout (%s) was reached.\n", *argGlobalTimeout)
 
+			sendTestEndChanSignal()
+
 			go tearDownWorkers()
 		case signal := <-signalChan:
 			fmt.Println()
 			fmt.Printf("Received %s. Aborting.\n", signal)
 
+			sendTestEndChanSignal()
+
 			go tearDownWorkers()
 		}
 	}
+
+	sendTestEndChanSignal()
 
 	summary, err := buildSummary(*argNumClients, num, results)
 	exitCode := 0
@@ -226,5 +255,6 @@ func tearDownWorkers() {
 		time.Sleep(delay)
 
 		stopWaitLoop = true
+		signalChan<-syscall.SIGINT
 	}
 }

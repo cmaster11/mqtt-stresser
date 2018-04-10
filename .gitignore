@@ -1,1 +1,4 @@
 build/
+vendor/**/*
+!vendor/vendor.json
+mqtt-stresser

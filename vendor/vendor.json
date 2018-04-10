@@ -1,0 +1,37 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "v/UrpFUgUEcYQQNiTQBIWje/up4=",
+			"path": "github.com/eclipse/paho.mqtt.golang",
+			"revision": "9ec68b7894ac4cd48fc9126e910e571d50eb5d9c",
+			"revisionTime": "2018-03-23T10:59:29Z"
+		},
+		{
+			"checksumSHA1": "ITCnG3uKUnqNXrnnulKokjQKfN4=",
+			"path": "github.com/eclipse/paho.mqtt.golang/packets",
+			"revision": "9ec68b7894ac4cd48fc9126e910e571d50eb5d9c",
+			"revisionTime": "2018-03-23T10:59:29Z"
+		},
+		{
+			"checksumSHA1": "+ukkAI9DvJ59HlvJSTVWME5Rqcg=",
+			"path": "golang.org/x/net/internal/socks",
+			"revision": "61147c48b25b599e5b561d2e9c4f3e1ef489ca41",
+			"revisionTime": "2017-03-19T02:15:06Z"
+		},
+		{
+			"checksumSHA1": "UrFs0T7kkYsUxJG5bsJt7KB8ejI=",
+			"path": "golang.org/x/net/proxy",
+			"revision": "61147c48b25b599e5b561d2e9c4f3e1ef489ca41",
+			"revisionTime": "2017-03-19T02:15:06Z"
+		},
+		{
+			"checksumSHA1": "7EZyXN0EmZLgGxZxK01IJua4c8o=",
+			"path": "golang.org/x/net/websocket",
+			"revision": "61147c48b25b599e5b561d2e9c4f3e1ef489ca41",
+			"revisionTime": "2017-03-19T02:15:06Z"
+		}
+	],
+	"rootPath": "mqtt-stresser"
+}

@@ -7,17 +7,14 @@ import (
 	"time"
 )
 
+var hostname, _ = os.Hostname()
+
 func (w *Worker) Run() {
 	verboseLogger.Printf("[%d] initializing\n", w.WorkerId)
 
 	queue := make(chan [2]string)
 	cid := w.WorkerId
 	t := randomSource.Int31()
-
-	hostname, err := os.Hostname()
-	if err != nil {
-		panic(err)
-	}
 
 	topicName := fmt.Sprintf(topicNameTemplate, hostname, w.WorkerId, t)
 	subscriberClientId := fmt.Sprintf(subscriberClientIdTemplate, hostname, w.WorkerId, t,)
@@ -64,7 +61,8 @@ func (w *Worker) Run() {
 
 		if token := subscriber.Unsubscribe(topicName); token.WaitTimeout(opTimeout) && token.Error() != nil {
 			fmt.Println(token.Error())
-			os.Exit(1)
+			//os.Exit(1)
+			return
 		}
 
 		subscriber.Disconnect(5)
@@ -160,4 +158,8 @@ func (w *Worker) Run() {
 	}
 
 	verboseLogger.Printf("[%d] worker finished\n", w.WorkerId)
+
+	if w.WaitTestEnd {
+		<-w.TestEndChan
+	}
 }
