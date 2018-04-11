@@ -51,6 +51,7 @@ var (
 	argCumulateConnections   = flag.Bool("cumulate-connections", false, "If used, clients will NOT disconnect until the end of the test")
 	argWaitForIntSignal   = flag.Bool("wait-for-int-signal", false, "If used, clients will NOT disconnect until an interrupt signal is received (invalidates global timeout)")
 	argPollingDelay   = flag.String("polling-delay", "1s", "If workers are kept alive using -cumulate-connections or -wait-for-int-signal, they'll poll the broker with this delay")
+	argPollingOnly          = flag.Bool("polling-only", false, "Disables message pub/sub test and executes pure polling only")
 	// TODO: connect using custom interface
 )
 
@@ -65,6 +66,7 @@ type Worker struct {
 	WaitTestEnd bool
 	TestEndChan chan bool
 	PollingDelay time.Duration
+	PollingOnly bool
 }
 
 type Result struct {
@@ -100,7 +102,14 @@ func main() {
 		}
 	}
 
+	pollingOnly := *argPollingOnly
+
 	num := *argNumMessages
+
+	if pollingOnly {
+		num = 0
+	}
+
 	brokerUrl := *argBrokerUrl
 	username := *argUsername
 	password := *argPassword
@@ -154,6 +163,7 @@ func main() {
 			WaitTestEnd: *argCumulateConnections,
 			TestEndChan: testEndChan,
 			PollingDelay: pollingDelay,
+			PollingOnly: pollingOnly,
 		}).Run()
 	}
 	fmt.Printf("%d worker started\n", *argNumClients)

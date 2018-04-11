@@ -7,7 +7,18 @@ import (
 	"time"
 )
 
-var hostname, _ = os.Hostname()
+var hostname string
+
+func init() {
+	hostname, _ = os.Hostname()
+
+	localAddr := os.Getenv("LOCAL_ADDRESS")
+	localInterface := os.Getenv("LOCAL_INTERFACE")
+
+	if len(localAddr) > 0 && len(localInterface) > 0 {
+		hostname = fmt.Sprintf("%s-%s", localInterface, localAddr)
+	}
+}
 
 func (w *Worker) Run() {
 	verboseLogger.Printf("[%d] initializing\n", w.WorkerId)
@@ -17,6 +28,12 @@ func (w *Worker) Run() {
 	t := randomSource.Int31()
 
 	topicName := fmt.Sprintf(topicNameTemplate, hostname, w.WorkerId, t)
+
+	if w.PollingOnly && w.PollingDelay > 0 && w.WaitTestEnd {
+		w.startPolling(t, topicName)
+		return
+	}
+
 	subscriberClientId := fmt.Sprintf(subscriberClientIdTemplate, hostname, w.WorkerId, t,)
 	publisherClientId := fmt.Sprintf(publisherClientIdTemplate, hostname, w.WorkerId, t)
 
@@ -34,6 +51,9 @@ func (w *Worker) Run() {
 
 	verboseLogger.Printf("[%d] connecting publisher\n", w.WorkerId)
 	if token := publisher.Connect(); token.Wait() && token.Error() != nil {
+
+		fmt.Printf("Publisher not connected: %s\n", token.Error())
+
 		resultChan <- Result{
 			WorkerId:     w.WorkerId,
 			Event:        "ConnectFailed",
@@ -45,6 +65,9 @@ func (w *Worker) Run() {
 
 	verboseLogger.Printf("[%d] connecting subscriber\n", w.WorkerId)
 	if token := subscriber.Connect(); token.WaitTimeout(opTimeout) && token.Error() != nil {
+
+		fmt.Printf("Subscriber not connected: %s\n", token.Error())
+
 		resultChan <- Result{
 			WorkerId:     w.WorkerId,
 			Event:        "ConnectFailed",
@@ -159,39 +182,62 @@ func (w *Worker) Run() {
 	verboseLogger.Printf("[%d] worker finished\n", w.WorkerId)
 
 	if w.PollingDelay > 0 && w.WaitTestEnd {
-		executePolling := true
-
-		go func() {
-			<-w.TestEndChan
-			executePolling = false
-		}()
-		
-		// Starts a polling worker, will automatically trigger deferred disconnection of subscriber
-		go func() {
-			pollingPublisherClientId := fmt.Sprintf(publisherClientIdTemplate, hostname, w.WorkerId, t)
-			pollingPublisherOptions := mqtt.NewClientOptions().SetClientID(pollingPublisherClientId).SetUsername(w.Username).SetPassword(w.Password).AddBroker(w.BrokerUrl)
-			pollingPublisher := mqtt.NewClient(pollingPublisherOptions)
-
-			verboseLogger.Printf("[%d] connecting polling publisher\n", w.WorkerId)
-			if token := pollingPublisher.Connect(); token.Wait() && token.Error() != nil {
-				verboseLogger.Printf("[%d] failed to connect polling publisher\n", w.WorkerId)
-				return
-			}
-
-			i := 0
-			for executePolling {
-				text := fmt.Sprintf("this is polling msg #%d!", i)
-				token := publisher.Publish(topicName, 0, false, text)
-				token.Wait()
-				verboseLogger.Printf("[%d] sent polling message\n", w.WorkerId)
-				time.Sleep(w.PollingDelay)
-			}
-
-			pollingPublisher.Disconnect(5)
-		}()
+		w.startPolling(t, topicName)
 	} else {
 		if w.WaitTestEnd {
 			<-w.TestEndChan
 		}
 	}
+}
+
+func (w *Worker) startPolling(t int32, topicName string) {
+	executePolling := true
+
+	go func() {
+		<-w.TestEndChan
+		executePolling = false
+	}()
+	
+	// Starts a polling worker, will automatically trigger deferred disconnection of subscriber
+	go func() {
+		pollingPublisherClientId := fmt.Sprintf(publisherClientIdTemplate, hostname, w.WorkerId, t)
+		pollingPublisherOptions := mqtt.NewClientOptions().SetClientID(pollingPublisherClientId).SetUsername(w.Username).SetPassword(w.Password).AddBroker(w.BrokerUrl)
+		pollingPublisher := mqtt.NewClient(pollingPublisherOptions)
+
+		verboseLogger.Printf("[%d] connecting polling publisher\n", w.WorkerId)
+		if token := pollingPublisher.Connect(); token.Wait() && token.Error() != nil {
+			verboseLogger.Printf("[%d] failed to connect polling publisher\n", w.WorkerId)
+			
+			err := token.Error()
+			fmt.Printf("Polling not connected: %s\n", err)
+
+			if w.PollingOnly {
+				resultChan <- Result{
+					WorkerId:     w.WorkerId,
+					Event:        "ConnectFailed",
+					Error:        true,
+					ErrorMessage: err,
+				}
+			}
+			return
+		}
+
+		if w.PollingOnly {
+			resultChan <- Result{
+				WorkerId:          w.WorkerId,
+				Event:             "Completed",
+			}
+		}
+
+		i := 0
+		for executePolling {
+			text := fmt.Sprintf("this is polling msg #%d!", i)
+			token := pollingPublisher.Publish(topicName, 0, false, text)
+			token.Wait()
+			verboseLogger.Printf("[%d] sent polling message\n", w.WorkerId)
+			time.Sleep(w.PollingDelay)
+		}
+
+		pollingPublisher.Disconnect(5)
+	}()
 }

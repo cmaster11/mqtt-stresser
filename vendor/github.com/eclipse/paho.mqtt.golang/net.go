@@ -94,7 +94,10 @@ func openConnection(uri *url.URL, tlsc *tls.Config, timeout time.Duration) (net.
 				panic("No local ip address found")
 			}
 
-			tcpAddr, _ := net.ResolveTCPAddr("tcp", foundAddrString)
+			tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:0", foundAddrString))
+			if err != nil {
+				panic(err)
+			}
 
 			dialer.LocalAddr = tcpAddr
 		}
