@@ -23,7 +23,6 @@ func (w *Worker) Run() {
 	verboseLogger.Printf("[%d] topic=%s subscriberClientId=%s publisherClientId=%s\n", cid, topicName, subscriberClientId, publisherClientId)
 
 	publisherOptions := mqtt.NewClientOptions().SetClientID(publisherClientId).SetUsername(w.Username).SetPassword(w.Password).AddBroker(w.BrokerUrl)
-
 	subscriberOptions := mqtt.NewClientOptions().SetClientID(subscriberClientId).SetUsername(w.Username).SetPassword(w.Password).AddBroker(w.BrokerUrl)
 
 	subscriberOptions.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
@@ -159,7 +158,40 @@ func (w *Worker) Run() {
 
 	verboseLogger.Printf("[%d] worker finished\n", w.WorkerId)
 
-	if w.WaitTestEnd {
-		<-w.TestEndChan
+	if w.PollingDelay > 0 && w.WaitTestEnd {
+		executePolling := true
+
+		go func() {
+			<-w.TestEndChan
+			executePolling = false
+		}()
+		
+		// Starts a polling worker, will automatically trigger deferred disconnection of subscriber
+		go func() {
+			pollingPublisherClientId := fmt.Sprintf(publisherClientIdTemplate, hostname, w.WorkerId, t)
+			pollingPublisherOptions := mqtt.NewClientOptions().SetClientID(pollingPublisherClientId).SetUsername(w.Username).SetPassword(w.Password).AddBroker(w.BrokerUrl)
+			pollingPublisher := mqtt.NewClient(pollingPublisherOptions)
+
+			verboseLogger.Printf("[%d] connecting polling publisher\n", w.WorkerId)
+			if token := pollingPublisher.Connect(); token.Wait() && token.Error() != nil {
+				verboseLogger.Printf("[%d] failed to connect polling publisher\n", w.WorkerId)
+				return
+			}
+
+			i := 0
+			for executePolling {
+				text := fmt.Sprintf("this is polling msg #%d!", i)
+				token := publisher.Publish(topicName, 0, false, text)
+				token.Wait()
+				verboseLogger.Printf("[%d] sent polling message\n", w.WorkerId)
+				time.Sleep(w.PollingDelay)
+			}
+
+			pollingPublisher.Disconnect(5)
+		}()
+	} else {
+		if w.WaitTestEnd {
+			<-w.TestEndChan
+		}
 	}
 }

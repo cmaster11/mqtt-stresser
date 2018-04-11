@@ -23,6 +23,7 @@ var (
 
 	subscriberClientIdTemplate = "mqtt-stresser-sub-%s-worker%d-%d"
 	publisherClientIdTemplate  = "mqtt-stresser-pub-%s-worker%d-%d"
+	pollingPublisherClientIdTemplate  = "mqtt-stresser-pol-pub-%s-worker%d-%d"
 	topicNameTemplate          = "internal/mqtt-stresser/%s/worker%d-%d"
 
 	opTimeout = 5 * time.Second
@@ -31,7 +32,6 @@ var (
 	verboseLogger = log.New(os.Stderr, "DEBUG: ", log.Lmicroseconds|log.Ltime|log.Lshortfile)
 
 	argNumClients    = flag.Int("num-clients", 10, "Number of concurrent clients")
-	argCumulateConnections   = flag.Bool("cumulate-connections", false, "If used, clients will NOT disconnect until the end of the test")
 	argNumMessages   = flag.Int("num-messages", 10, "Number of messages shipped by client")
 	argTimeout       = flag.String("timeout", "5s", "Timeout for pub/sub loop")
 	argGlobalTimeout = flag.String("global-timeout", "60s", "Timeout spanning all operations")
@@ -46,6 +46,12 @@ var (
 	argProfileMem    = flag.String("profile-mem", "", "write memory profile to `file`")
 	argHideProgress  = flag.Bool("no-progress", false, "Hide progress indicator")
 	argHelp          = flag.Bool("help", false, "Show help")
+
+	// Custom
+	argCumulateConnections   = flag.Bool("cumulate-connections", false, "If used, clients will NOT disconnect until the end of the test")
+	argWaitForIntSignal   = flag.Bool("wait-for-int-signal", false, "If used, clients will NOT disconnect until an interrupt signal is received (invalidates global timeout)")
+	argPollingDelay   = flag.String("polling-delay", "1s", "If workers are kept alive using -cumulate-connections or -wait-for-int-signal, they'll poll the broker with this delay")
+	// TODO: connect using custom interface
 )
 
 type Worker struct {
@@ -55,8 +61,10 @@ type Worker struct {
 	Password  string
 	Nmessages int
 	Timeout   time.Duration
+
 	WaitTestEnd bool
 	TestEndChan chan bool
+	PollingDelay time.Duration
 }
 
 type Result struct {
@@ -97,6 +105,7 @@ func main() {
 	username := *argUsername
 	password := *argPassword
 	testTimeout, _ := time.ParseDuration(*argTimeout)
+	pollingDelay, _ := time.ParseDuration(*argPollingDelay)
 
 	verboseLogger.SetOutput(ioutil.Discard)
 	errorLogger.SetOutput(ioutil.Discard)
@@ -144,6 +153,7 @@ func main() {
 			
 			WaitTestEnd: *argCumulateConnections,
 			TestEndChan: testEndChan,
+			PollingDelay: pollingDelay,
 		}).Run()
 	}
 	fmt.Printf("%d worker started\n", *argNumClients)
@@ -154,10 +164,12 @@ func main() {
 	globalTimeout, _ := time.ParseDuration(*argGlobalTimeout)
 	results := make([]Result, *argNumClients)
 
-	go func() {
-		time.Sleep(globalTimeout)
-		timeout <- true
-	}()
+	if !*argWaitForIntSignal {
+		go func() {
+			time.Sleep(globalTimeout)
+			timeout <- true
+		}()
+	}
 
 	testEndChanSignalSent := false
 	sendTestEndChanSignal := func () {
@@ -171,6 +183,8 @@ func main() {
 			}
 		}
 	}
+
+	signalReceived := false
 
 	for finEvents < *argNumClients && !stopWaitLoop {
 		select {
@@ -207,10 +221,18 @@ func main() {
 			fmt.Println()
 			fmt.Printf("Received %s. Aborting.\n", signal)
 
+			signalReceived = true
+
 			sendTestEndChanSignal()
 
 			go tearDownWorkers()
 		}
+	}
+
+	if *argWaitForIntSignal && !signalReceived {
+		fmt.Println()
+		fmt.Printf("Waiting for interrupt signal.\n")
+		<-signalChan
 	}
 
 	sendTestEndChanSignal()
