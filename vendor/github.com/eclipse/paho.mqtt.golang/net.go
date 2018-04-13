@@ -91,7 +91,7 @@ func openConnection(uri *url.URL, tlsc *tls.Config, timeout time.Duration) (net.
 			}
 
 			if foundAddrString == "" {
-				panic("No local ip address found")
+				panic(fmt.Sprintf("No local ip address found: %s", localAddr))
 			}
 
 			tcpAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:0", foundAddrString))

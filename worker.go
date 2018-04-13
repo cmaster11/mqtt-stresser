@@ -5,6 +5,8 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"os"
 	"time"
+	"math/rand"
+	"errors"
 )
 
 var hostname string
@@ -18,6 +20,19 @@ func init() {
 	if len(localAddr) > 0 && len(localInterface) > 0 {
 		hostname = fmt.Sprintf("%s-%s", localInterface, localAddr)
 	}
+}
+
+func waitTimeoutOrError(token mqtt.Token) bool {
+	return token.WaitTimeout(opTimeout) == false || token.Error() != nil
+}
+
+var timeoutError error = errors.New("Timeout")
+func tokenErrorOrTimeout(token mqtt.Token) error {
+	tokenError := token.Error()
+	if tokenError == nil {
+		return timeoutError
+	}
+	return tokenError
 }
 
 func (w *Worker) Run() {
@@ -50,29 +65,31 @@ func (w *Worker) Run() {
 	subscriber := mqtt.NewClient(subscriberOptions)
 
 	verboseLogger.Printf("[%d] connecting publisher\n", w.WorkerId)
-	if token := publisher.Connect(); token.Wait() && token.Error() != nil {
-
-		fmt.Printf("Publisher not connected: %s\n", token.Error())
+	if token := publisher.Connect(); waitTimeoutOrError(token) {
+		workerConnectionErrorsCount++
+		err := tokenErrorOrTimeout(token)
+		fmt.Printf("Publisher not connected: %s\n", err)
 
 		resultChan <- Result{
 			WorkerId:     w.WorkerId,
 			Event:        "ConnectFailed",
 			Error:        true,
-			ErrorMessage: token.Error(),
+			ErrorMessage: err,
 		}
 		return
 	}
 
 	verboseLogger.Printf("[%d] connecting subscriber\n", w.WorkerId)
-	if token := subscriber.Connect(); token.WaitTimeout(opTimeout) && token.Error() != nil {
-
-		fmt.Printf("Subscriber not connected: %s\n", token.Error())
+	if token := subscriber.Connect(); waitTimeoutOrError(token) {
+		workerConnectionErrorsCount++
+		err := tokenErrorOrTimeout(token)
+		fmt.Printf("Subscriber not connected: %s\n", err)
 
 		resultChan <- Result{
 			WorkerId:     w.WorkerId,
 			Event:        "ConnectFailed",
 			Error:        true,
-			ErrorMessage: token.Error(),
+			ErrorMessage: err,
 		}
 
 		return
@@ -81,8 +98,8 @@ func (w *Worker) Run() {
 	defer func() {
 		verboseLogger.Printf("[%d] unsubscribe\n", w.WorkerId)
 
-		if token := subscriber.Unsubscribe(topicName); token.WaitTimeout(opTimeout) && token.Error() != nil {
-			fmt.Println(token.Error())
+		if token := subscriber.Unsubscribe(topicName); waitTimeoutOrError(token) {
+			fmt.Println(tokenErrorOrTimeout(token))
 			//os.Exit(1)
 			return
 		}
@@ -91,12 +108,12 @@ func (w *Worker) Run() {
 	}()
 
 	verboseLogger.Printf("[%d] subscribing to topic\n", w.WorkerId)
-	if token := subscriber.Subscribe(topicName, 0, nil); token.WaitTimeout(opTimeout) && token.Error() != nil {
+	if token := subscriber.Subscribe(topicName, 0, nil); waitTimeoutOrError(token) {
 		resultChan <- Result{
 			WorkerId:     w.WorkerId,
 			Event:        "SubscribeFailed",
 			Error:        true,
-			ErrorMessage: token.Error(),
+			ErrorMessage: tokenErrorOrTimeout(token),
 		}
 
 		return
@@ -127,7 +144,7 @@ func (w *Worker) Run() {
 	}()
 
 	t0 = time.Now()
-	for receivedCount < w.Nmessages && !stopWorker {
+	for receivedCount < w.Nmessages && !stopWorker && !shouldTerminate {
 		select {
 		case <-queue:
 			receivedCount++
@@ -181,11 +198,13 @@ func (w *Worker) Run() {
 
 	verboseLogger.Printf("[%d] worker finished\n", w.WorkerId)
 
-	if w.PollingDelay > 0 && w.WaitTestEnd {
-		w.startPolling(t, topicName)
-	} else {
-		if w.WaitTestEnd {
-			<-w.TestEndChan
+	if !shouldTerminate {
+		if w.PollingDelay > 0 && w.WaitTestEnd {
+			w.startPolling(t, topicName)
+		} else {
+			if w.WaitTestEnd {
+				<-w.TestEndChan
+			}
 		}
 	}
 }
@@ -205,10 +224,11 @@ func (w *Worker) startPolling(t int32, topicName string) {
 		pollingPublisher := mqtt.NewClient(pollingPublisherOptions)
 
 		verboseLogger.Printf("[%d] connecting polling publisher\n", w.WorkerId)
-		if token := pollingPublisher.Connect(); token.Wait() && token.Error() != nil {
+		if token := pollingPublisher.Connect(); waitTimeoutOrError(token) {
+			workerConnectionErrorsCount++
 			verboseLogger.Printf("[%d] failed to connect polling publisher\n", w.WorkerId)
 			
-			err := token.Error()
+			err := tokenErrorOrTimeout(token)
 			fmt.Printf("Polling not connected: %s\n", err)
 
 			if w.PollingOnly {
@@ -230,12 +250,19 @@ func (w *Worker) startPolling(t int32, topicName string) {
 		}
 
 		i := 0
-		for executePolling {
+		for executePolling && !shouldTerminate {
 			text := fmt.Sprintf("this is polling msg #%d!", i)
 			token := pollingPublisher.Publish(topicName, 0, false, text)
 			token.Wait()
 			verboseLogger.Printf("[%d] sent polling message\n", w.WorkerId)
-			time.Sleep(w.PollingDelay)
+
+			// Creates a slight deviation from standard delay
+			var deviationPercentage int64 = 20 // n%
+			maxDeviation := int64(w.PollingDelay) / 100 * deviationPercentage * 2
+			randDeviation := rand.Int63n(maxDeviation)
+			deviatedDelay := time.Duration(int64(w.PollingDelay) + randDeviation)
+
+			time.Sleep(deviatedDelay)
 		}
 
 		pollingPublisher.Disconnect(5)

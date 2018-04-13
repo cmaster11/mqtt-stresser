@@ -12,14 +12,15 @@ import (
 	"runtime/pprof"
 	"syscall"
 	"time"
+	"errors"
 )
 
 var (
 	resultChan         = make(chan Result)
 	abortChan          = make(chan bool)
-	stopWaitLoop       = false
-	tearDownInProgress = false
+	shouldTerminate    = false
 	randomSource       = rand.New(rand.NewSource(time.Now().UnixNano()))
+	stopGeneratingWorkers = false
 
 	subscriberClientIdTemplate = "mqtt-stresser-sub-%s-worker%d-%d"
 	publisherClientIdTemplate  = "mqtt-stresser-pub-%s-worker%d-%d"
@@ -27,6 +28,7 @@ var (
 	topicNameTemplate          = "internal/mqtt-stresser/%s/worker%d-%d"
 
 	opTimeout = 5 * time.Second
+	workerConnectionErrorsCount = 0
 
 	errorLogger   = log.New(os.Stderr, "ERROR: ", log.Lmicroseconds|log.Ltime|log.Lshortfile)
 	verboseLogger = log.New(os.Stderr, "DEBUG: ", log.Lmicroseconds|log.Ltime|log.Lshortfile)
@@ -37,7 +39,6 @@ var (
 	argGlobalTimeout = flag.String("global-timeout", "60s", "Timeout spanning all operations")
 	argRampUpSize    = flag.Int("rampup-size", 100, "Size of rampup batch")
 	argRampUpDelay   = flag.String("rampup-delay", "500ms", "Time between batch rampups")
-	argTearDownDelay = flag.String("teardown-delay", "5s", "Graceperiod to complete remaining workers")
 	argBrokerUrl     = flag.String("broker", "", "Broker URL")
 	argUsername      = flag.String("username", "", "Username")
 	argPassword      = flag.String("password", "", "Password")
@@ -52,7 +53,7 @@ var (
 	argWaitForIntSignal   = flag.Bool("wait-for-int-signal", false, "If used, clients will NOT disconnect until an interrupt signal is received (invalidates global timeout)")
 	argPollingDelay   = flag.String("polling-delay", "1s", "If workers are kept alive using -cumulate-connections or -wait-for-int-signal, they'll poll the broker with this delay")
 	argPollingOnly          = flag.Bool("polling-only", false, "Disables message pub/sub test and executes pure polling only")
-	// TODO: connect using custom interface
+	argStopAfterErrors          = flag.Int("stop-after-errors", 0, "Stops generating workers if n worker fails connecting")
 )
 
 type Worker struct {
@@ -81,6 +82,7 @@ type Result struct {
 }
 
 var signalChan chan os.Signal
+var tooManyErrorsError error = errors.New("Too many errors")
 
 func main() {
 	flag.Parse()
@@ -134,6 +136,18 @@ func main() {
 	signalChan = make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
 
+	go func() {
+		for !shouldTerminate {
+			select {
+				case signal := <-signalChan:
+					shouldTerminate = true
+
+					fmt.Println()
+					fmt.Printf("Received %s. Aborting.\n", signal)
+			}
+		}
+	}()
+
 	rampUpDelay, _ := time.ParseDuration(*argRampUpDelay)
 	rampUpSize := *argRampUpSize
 
@@ -145,8 +159,8 @@ func main() {
 
 	testEndChan := make(chan bool, *argNumClients)
 
-	for cid := 0; cid < *argNumClients; cid++ {
-
+	cid := 0
+	for cid = 0; cid < *argNumClients && !shouldTerminate && (*argStopAfterErrors == 0 || (*argStopAfterErrors > 0 && workerConnectionErrorsCount < *argStopAfterErrors)); cid++ {
 		if cid%rampUpSize == 0 && cid > 0 {
 			fmt.Printf("%d worker started - waiting %s\n", cid, rampUpDelay)
 			time.Sleep(rampUpDelay)
@@ -166,7 +180,18 @@ func main() {
 			PollingOnly: pollingOnly,
 		}).Run()
 	}
-	fmt.Printf("%d worker started\n", *argNumClients)
+
+	if *argStopAfterErrors > 0 && workerConnectionErrorsCount >= *argStopAfterErrors {
+		fmt.Printf("Workers generation stopped (%d client created). Reached %d connection errors\n", cid, workerConnectionErrorsCount)
+		for idx := cid; idx < *argNumClients; idx ++ {
+			resultChan <- Result{
+				WorkerId:     idx,
+				Event:        "ConnectFailed",
+				Error:        true,
+				ErrorMessage: tooManyErrorsError,
+			}
+		}
+	}
 
 	finEvents := 0
 
@@ -194,9 +219,7 @@ func main() {
 		}
 	}
 
-	signalReceived := false
-
-	for finEvents < *argNumClients && !stopWaitLoop {
+	for finEvents < *argNumClients && !shouldTerminate {
 		select {
 		case msg := <-resultChan:
 			results[msg.WorkerId] = msg
@@ -224,25 +247,16 @@ func main() {
 			fmt.Println()
 			fmt.Printf("Aborted because global timeout (%s) was reached.\n", *argGlobalTimeout)
 
-			sendTestEndChanSignal()
-
-			go tearDownWorkers()
-		case signal := <-signalChan:
-			fmt.Println()
-			fmt.Printf("Received %s. Aborting.\n", signal)
-
-			signalReceived = true
-
-			sendTestEndChanSignal()
-
-			go tearDownWorkers()
+			shouldTerminate = true
 		}
 	}
 
-	if *argWaitForIntSignal && !signalReceived {
+	if *argWaitForIntSignal && !shouldTerminate {
 		fmt.Println()
 		fmt.Printf("Waiting for interrupt signal.\n")
-		<-signalChan
+		for !shouldTerminate {
+			time.Sleep(250 * time.Millisecond)
+		}
 	}
 
 	sendTestEndChanSignal()
@@ -274,19 +288,4 @@ func main() {
 	pprof.StopCPUProfile()
 
 	os.Exit(exitCode)
-}
-
-func tearDownWorkers() {
-	if !tearDownInProgress {
-		tearDownInProgress = true
-
-		close(abortChan)
-
-		delay, _ := time.ParseDuration(*argTearDownDelay)
-		fmt.Printf("Waiting %s for remaining workers\n", delay)
-		time.Sleep(delay)
-
-		stopWaitLoop = true
-		signalChan<-syscall.SIGINT
-	}
 }
